@@ -2,6 +2,7 @@
 #define DOUBLECLIQUE_ACK_REGION_H
 
 #include <stdint.h>
+#include <time.h>
 #include "request_region.h"
 
 enum request_promise_status {
