@@ -283,6 +283,16 @@ static void do_experiment_with_max_inflight(
     printf("    p50 latency               : %" PRIu64 " ns\n", p50_ns);
     printf("    p95 latency               : %" PRIu64 " ns\n", p95_ns);
     printf("    p99 latency               : %" PRIu64 " ns\n", p99_ns);
+    {
+        uint32_t over60 = 0, over30 = 0;
+        for (uint32_t q = 0; q < NUM_SAMPLES; q++) {
+            if (latencies[q] >= 60000) over60++;
+            if (latencies[q] >= 30000) over30++;
+        }
+        printf("    TAIL p99.9 %" PRIu64 " p99.99 %" PRIu64 " max %" PRIu64 " over30us %u over60us %u\n",
+               latencies[((NUM_SAMPLES - 1) * 999) / 1000], latencies[((NUM_SAMPLES - 1) * 9999) / 10000],
+               latencies[NUM_SAMPLES - 1], over30, over60);
+    }
     printf("    throughput                : %.2f ops/sec\n", throughput_ops_per_sec);
     printf("    avg in-flight             : %.2f\n", avg_in_flight);
 
