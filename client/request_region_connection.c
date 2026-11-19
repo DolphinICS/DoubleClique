@@ -1,3 +1,4 @@
+#include <immintrin.h>
 #include "request_region_connection.h"
 
 #include <sisci_types.h>
@@ -110,7 +111,8 @@ void send_request_region_slot(
         CHUNK_SIZE);
     
     slot->status = status;
-    // TODO: potentially an sfence here
+    // Push the status out of the write combining buffer now rather than whenever it drains
+    _mm_sfence();
 
     perf_record_ns_bytes(
         PROF_CLIENT_SEND_HEADER,
