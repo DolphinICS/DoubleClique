@@ -79,6 +79,18 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
     return ack_slot->promise;
 }
 
+static bool phase1_quorum_acked(ack_slot_t *ack_slot) {
+    uint32_t success = 0;
+    for (uint32_t replica_index = 0; replica_index < REPLICA_COUNT; replica_index++) {
+        replica_ack_t *replica_ack_instance = ack_slot->replica_ack_instances[replica_index];
+        enum replica_ack_type ack_type = replica_ack_instance->replica_ack_type;
+        __asm__ volatile("" ::: "memory");
+        if (replica_ack_instance->version_number != ack_slot->request_tag) continue;
+        if (ack_type == REPLICA_ACK_SUCCESS) success++;
+    }
+    return success >= (REPLICA_COUNT + 1) / 2;
+}
+
 bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     uint64_t poll_start_ns = perf_now_ns();
     uint64_t timeout_check_ns = 0;
@@ -129,7 +141,7 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     timeout_check_ns += perf_now_ns() - timeout_check_start_ns;
 
     uint64_t decision_start_ns = perf_now_ns();
-    if (timed_out) {
+    if (timed_out && !phase1_quorum_acked(ack_slot)) {
         decision_timeout_ns += perf_now_ns() - decision_start_ns;
         uint64_t result_start_ns = perf_now_ns();
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
@@ -258,6 +270,12 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                 decision_ns += perf_now_ns() - decision_start_ns;
                 // We did not find any candidates, so we do not want to consume yet wait for more acks to arrive
                 uint64_t result_start_ns = perf_now_ns();
+                if (timed_out) {
+                    insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+                    ack_slot->promise->result = PROMISE_TIMEOUT;
+                    get_2_sided_decrement();
+                    GET2_PHASE1_RETURN(true, result_start_ns);
+                }
                 GET2_PHASE1_RETURN(false, result_start_ns);
             }
         }
@@ -389,7 +407,10 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
         ((end_p.tv_sec - ack_slot->start_time.tv_sec) * 1000000000L + (end_p.tv_nsec - ack_slot->start_time.tv_nsec)) >= GET_TIMEOUT_2_SIDED_NS;
     perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_TIMEOUT_CHECK, perf_now_ns() - timeout_check_start_ns);
 
-    if (timed_out) {
+    bool phase2_acked = ack_slot->replica_ack_instances[0]->replica_ack_type != REPLICA_NOT_ACKED;
+    __asm__ volatile("" ::: "memory");
+    phase2_acked = phase2_acked && ack_slot->replica_ack_instances[0]->version_number == ack_slot->request_tag;
+    if (timed_out && !phase2_acked) {
         uint64_t result_start_ns = perf_now_ns();
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
         ack_slot->promise->result = PROMISE_TIMEOUT;
