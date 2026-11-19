@@ -193,8 +193,13 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
             );
             ack_slot->data_size = header_data_length;
 
+            // Replicas write ack data contiguously, so never let it straddle the end: reserve the tail too and start at 0
+            uint32_t ack_skip = 0;
+            if (free_ack_offset + ack_data_length > ACK_REGION_DATA_SIZE) {
+                ack_skip = ACK_REGION_DATA_SIZE - free_ack_offset;
+            }
             block_for_available_space(
-                ack_data_length,
+                ack_data_length + ack_skip,
                 &free_ack_offset,
                 oldest_ack_offset,
                 &ack_slot->starting_ack_data_offset,
@@ -202,7 +207,10 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
                 PROF_CLIENT_ACK_ACK_SPACE_WAIT,
                 &ack_space_total_ns
             );
-            ack_slot->ack_data_size = ack_data_length;
+            if (ack_skip != 0) {
+                ack_slot->starting_ack_data_offset = 0;
+            }
+            ack_slot->ack_data_size = ack_data_length + ack_skip;
 
             uint64_t commit_start_ns = perf_now_ns();
             clock_gettime(CLOCK_MONOTONIC, &ack_slot->start_time);
