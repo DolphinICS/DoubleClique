@@ -11,6 +11,7 @@
 #include "request_region_connection.h"
 #include "ack_region.h"
 #include "sequence.h"
+#include "avx_cpy.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 
@@ -56,18 +57,15 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
 
     uint64_t copy_start_ns = perf_now_ns();
 
-    // First copy the key
-    for (uint32_t i = 0; i < key_len; i++) {
-        hash_data[i] = key[i];
-        data_region_start[current_offset] = key[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
-    }
-
-    // Next copy the data
-    for (uint32_t i = 0; i < value_len; i++) {
-        hash_data[i + key_len] = ((char *) value)[i];
-        data_region_start[current_offset] = ((char *) value)[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
+    // Stage key and value, then copy to the request region in at most two blocks (split at the wrap)
+    memcpy(hash_data, key, key_len);
+    memcpy(hash_data + key_len, value, value_len);
+    uint32_t payload_len = (uint32_t) key_len + value_len;
+    uint32_t first_len = (uint32_t) REQUEST_REGION_DATA_SIZE - current_offset;
+    if (first_len > payload_len) first_len = payload_len;
+    memcpy_nt_avx2(data_region_start + current_offset, hash_data, first_len, CHUNK_SIZE);
+    if (payload_len > first_len) {
+        memcpy_nt_avx2(data_region_start, hash_data + first_len, payload_len - first_len, CHUNK_SIZE);
     }
 
     // Copy version number into the first 4 bytes of hash_data
