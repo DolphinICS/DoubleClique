@@ -11,18 +11,19 @@
 #include "profiler.h"
 #include "profiler_metrics.h"
 
+// Serializes submitters (main and phase 2 thread) only, the ack thread consumes without it
 static pthread_mutex_t ack_mutex;
 
-static uint32_t free_header_slot = 0;
-static uint32_t oldest_header_slot = 0;
+static _Atomic uint32_t free_header_slot = 0;
+static _Atomic uint32_t oldest_header_slot = 0;
 
 static uint32_t free_ack_offset = 0;
-static uint32_t oldest_ack_offset = 0;
+static _Atomic uint32_t oldest_ack_offset = 0;
 
-static uint32_t current_get_2_sided_requests = 0;
+static _Atomic uint32_t current_get_2_sided_requests = 0;
 
 static uint32_t free_data_offset = 0;
-static uint32_t oldest_data_offset = 0;
+static _Atomic uint32_t oldest_data_offset = 0;
 
 replica_ack_t *replica_ack;
 ack_slot_t ack_slots[REQUEST_SLOTS];
@@ -33,7 +34,7 @@ sci_map_t ack_map;
 static void block_for_available_space(
     uint32_t required_space,
     uint32_t *free_offset,
-    uint32_t oldest_offset,
+    _Atomic uint32_t *oldest_offset,
     uint32_t *out_starting_offset,
     uint32_t region_space,
     client_perf_metric_id_t wait_metric,
@@ -185,7 +186,7 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
             block_for_available_space(
                 header_data_length,
                 &free_data_offset,
-                oldest_data_offset,
+                &oldest_data_offset,
                 &ack_slot->starting_data_offset,
                 REQUEST_REGION_DATA_SIZE,
                 PROF_CLIENT_ACK_DATA_SPACE_WAIT,
@@ -201,7 +202,7 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
             block_for_available_space(
                 ack_data_length + ack_skip,
                 &free_ack_offset,
-                oldest_ack_offset,
+                &oldest_ack_offset,
                 &ack_slot->starting_ack_data_offset,
                 ACK_REGION_DATA_SIZE,
                 PROF_CLIENT_ACK_ACK_SPACE_WAIT,
@@ -271,14 +272,13 @@ void get_2_sided_decrement(void) {
 
 void *ack_thread(__attribute__((unused)) void *_args) {
     while (1) {
-        pthread_mutex_lock(&ack_mutex);
-        if (oldest_header_slot == free_header_slot) { 
-            pthread_mutex_unlock(&ack_mutex);
+        uint32_t oldest = oldest_header_slot;
+        if (oldest == free_header_slot) {
             _mm_pause();
-            continue; 
+            continue;
         }
 
-        ack_slot_t *ack_slot = &ack_slots[oldest_header_slot];
+        ack_slot_t *ack_slot = &ack_slots[oldest];
 
         bool consumed;
         switch (ack_slot->request_type) {
@@ -298,17 +298,15 @@ void *ack_thread(__attribute__((unused)) void *_args) {
         }
 
         if (!consumed) {
-            pthread_mutex_unlock(&ack_mutex);
+            _mm_pause();
             continue;
         }
 
         ack_slot->header_slot_WRITE_ONLY->status = HEADER_SLOT_UNUSED;
-        oldest_header_slot = (oldest_header_slot + 1) % REQUEST_SLOTS;
+        // Free the space before the slot, submitters reuse a slot only after oldest_header_slot moves
         oldest_data_offset = (oldest_data_offset + ack_slot->data_size) % REQUEST_REGION_DATA_SIZE;
         oldest_ack_offset = (oldest_ack_offset + ack_slot->ack_data_size) % ACK_REGION_DATA_SIZE;
-        pthread_mutex_unlock(&ack_mutex);
-
-        _mm_pause();
+        oldest_header_slot = (oldest + 1) % REQUEST_SLOTS;
     }
 
     return NULL;
@@ -317,7 +315,7 @@ void *ack_thread(__attribute__((unused)) void *_args) {
 static void block_for_available_space(
     uint32_t required_space,
     uint32_t *free_offset,
-    uint32_t oldest_offset,
+    _Atomic uint32_t *oldest_offset,
     uint32_t *out_starting_offset,
     uint32_t region_space,
     client_perf_metric_id_t wait_metric,
@@ -330,7 +328,7 @@ static void block_for_available_space(
     bool available_space = false;
     while (1) {
         uint32_t used = (*free_offset + region_space
-                         - oldest_offset)
+                         - *oldest_offset)
                         % region_space;
 
         uint32_t free_space = region_space - used;
