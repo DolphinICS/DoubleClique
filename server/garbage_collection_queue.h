@@ -6,7 +6,7 @@
 #include <time.h>
 
 #define QUEUE_SPACE 100000
-#define NS_TO_COLLECTION 1000
+#define NS_TO_COLLECTION 1000000
 
 typedef struct {
     struct timespec t;
