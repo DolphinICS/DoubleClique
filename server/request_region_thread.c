@@ -302,8 +302,13 @@ int request_region_poller(void *arg) {
          * when we continue;.
          */
         for (uint32_t current_head_slot = 0; current_head_slot < REQUEST_SLOTS; current_head_slot++) {
+            // Status first: the client writes the fields, fences, then the status, so fields read after a used
+            // status are the new ones. Reading them in one struct copy can return the previous request's fields.
+            enum header_slot_status status = ((volatile header_slot_t *) &request_region->header_slots[current_head_slot])->status;
+            if (status == HEADER_SLOT_UNUSED) continue;
+            __asm__ volatile("" ::: "memory");
             header_slot_t slot = request_region->header_slots[current_head_slot];
-            if (slot.status == HEADER_SLOT_UNUSED) continue;
+            slot.status = status;
             uint64_t slot_total_start_ns = perf_now_ns();
 
             uint64_t slot_load_start_ns = perf_now_ns();
