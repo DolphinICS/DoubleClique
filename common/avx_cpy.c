@@ -75,7 +75,7 @@ void memcpy_nt_avx2(void *__restrict dst,
         dst_tmp += n;
         src_tmp += n;
         bytes   -= n;
+        /* Fence after every chunk */
+        _mm_sfence();
     }
-
-    _mm_sfence();
 }
