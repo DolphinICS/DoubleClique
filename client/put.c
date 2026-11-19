@@ -157,8 +157,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
     if (quorum_reached) {
         uint64_t result_start_ns = perf_now_ns();
         // Success!
-        ack_slot->promise->result = PROMISE_SUCCESS;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_SUCCESS;
         result_ns += perf_now_ns() - result_start_ns;
         PUT_POLL_RETURN(true);
     }
@@ -188,8 +188,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
         if (mix) {
             control_flow_ns += perf_now_ns() - control_start_ns;
             uint64_t result_start_ns = perf_now_ns();
-            ack_slot->promise->result = PROMISE_ERROR_MIX;
             insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+            ack_slot->promise->result = PROMISE_ERROR_MIX;
             result_ns += perf_now_ns() - result_start_ns;
             PUT_POLL_RETURN(true);
         }
@@ -225,8 +225,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
     if (timed_out) {
         control_flow_ns += perf_now_ns() - control_start_ns;
         uint64_t result_start_ns = perf_now_ns();
-        ack_slot->promise->result = PROMISE_TIMEOUT;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_TIMEOUT;
         result_ns += perf_now_ns() - result_start_ns;
         PUT_POLL_RETURN(true);
     }

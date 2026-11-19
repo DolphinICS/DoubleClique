@@ -131,8 +131,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     if (timed_out) {
         decision_timeout_ns += perf_now_ns() - decision_start_ns;
         uint64_t result_start_ns = perf_now_ns();
-        ack_slot->promise->result = PROMISE_TIMEOUT;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_TIMEOUT;
         get_2_sided_decrement();
         GET2_PHASE1_RETURN(true, result_start_ns);
     }
@@ -247,8 +247,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                 decision_ns += perf_now_ns() - decision_start_ns;
                 uint64_t result_start_ns = perf_now_ns();
                 // If we have gotten replies from all replicas and can not find a quorum, it is an error
-                ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
                 insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+                ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
                 get_2_sided_decrement();
                 GET2_PHASE1_RETURN(true, result_start_ns);
             } else {
@@ -297,8 +297,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                         //TODO: Full key verification?
 
                         memcpy(ack_slot->promise->data, ack_data + key_len, value_len);
-                        ack_slot->promise->result = PROMISE_SUCCESS_PH1;
                         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+                        ack_slot->promise->result = PROMISE_SUCCESS_PH1;
                         get_2_sided_decrement();
                         fastpath_verify_ns += perf_now_ns() - verify_start_ns;
                         uint64_t select_total_ns = perf_now_ns() - select_start_ns;
@@ -350,8 +350,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
         if (shipped == 0) {
             decision_ns += perf_now_ns() - decision_start_ns;
             uint64_t result_start_ns = perf_now_ns();
-            ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
             insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+            ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
             get_2_sided_decrement();
             GET2_PHASE1_RETURN(true, result_start_ns);
         }
@@ -388,8 +388,8 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
 
     if (timed_out) {
         uint64_t result_start_ns = perf_now_ns();
-        ack_slot->promise->result = PROMISE_TIMEOUT;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_TIMEOUT;
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
 
@@ -402,8 +402,8 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
     if (ack_slot->replica_ack_instances[0]->replica_ack_type != REPLICA_ACK_SUCCESS) {
         uint64_t result_start_ns = perf_now_ns();
         fprintf(stderr, "Unsupported ack state for phase2\n");
-        ack_slot->promise->result = PROMISE_ERROR_TRANSFER;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_ERROR_TRANSFER;
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
 
@@ -418,8 +418,8 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
     if (hash != expected_hash) {
         //TODO: This seems like a bug, as we could have shipped multiple phase2 requests.
         uint64_t result_start_ns = perf_now_ns();
-        ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
         perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_VERIFY_AND_COPY, perf_now_ns() - verify_and_copy_start_ns);
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
@@ -432,8 +432,8 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
 
     //TODO: No full key verification?
     memcpy(ack_slot->promise->data, ack_data + ack_slot->key_len, ack_slot->value_len);
-    ack_slot->promise->result = PROMISE_SUCCESS;
     insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+    ack_slot->promise->result = PROMISE_SUCCESS;
     perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_VERIFY_AND_COPY, perf_now_ns() - verify_and_copy_start_ns);
     uint64_t result_start_ns = perf_now_ns();
     GET2_PHASE2_RETURN(true, result_start_ns);
