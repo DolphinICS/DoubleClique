@@ -8,7 +8,7 @@
 #include "sisci_glob_defs.h"
 #include "index_data_protocol.h"
 
-#define REQUEST_SLOTS 50000
+#define REQUEST_SLOTS 1024
 #define REQUEST_SEGMENT_ID 1
 #define MAX_VERSION_NUMBER 0x1000000
 // The largest version number is 2**24 as the top 8 bits are used for the replica node id
