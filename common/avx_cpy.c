@@ -79,3 +79,20 @@ void memcpy_nt_avx2(void *__restrict dst,
         _mm_sfence();
     }
 }
+
+/* As memcpy_nt_avx2, but small copies are not fenced: the caller fences before publishing them */
+void memcpy_nt_avx2_unfenced(void *__restrict dst,
+                             const void *__restrict src,
+                             size_t bytes,
+                             size_t chunk)
+{
+    if (chunk == 0 || bytes == 0)
+        return;
+
+    if (bytes < chunk * 2) {
+        _memcpy_nt_avx2_helper(dst, src, bytes);
+        return;
+    }
+
+    memcpy_nt_avx2(dst, src, bytes, chunk);
+}

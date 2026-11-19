@@ -4,6 +4,7 @@
 #include <sisci_api.h>
 #include "2_phase_2_sided.h"
 #include "ack_region.h"
+#include "avx_cpy.h"
 #include "request_region_connection.h"
 #include "super_fast_hash.h"
 #include "2_phase_1_sided.h"
@@ -41,9 +42,12 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
     uint64_t copy_start_ns = perf_now_ns();
 
     // First copy the key
-    for (uint32_t i = 0; i < key_len; i++) {
-        data_region_start[current_offset] = key[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
+    // send_request_region_slot fences before the status store, which orders the key too
+    uint32_t first_len = (uint32_t) REQUEST_REGION_DATA_SIZE - current_offset;
+    if (first_len > key_len) first_len = key_len;
+    memcpy_nt_avx2_unfenced(data_region_start + current_offset, key, first_len, CHUNK_SIZE);
+    if (key_len > first_len) {
+        memcpy_nt_avx2_unfenced(data_region_start, key + first_len, key_len - first_len, CHUNK_SIZE);
     }
     perf_record_ns_bytes(PROF_CLIENT_GET2_COPY, perf_now_ns() - copy_start_ns, key_len);
 
