@@ -410,6 +410,7 @@ static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_
     volatile replica_ack_t *replica_ack_instance = replica_ack_remote_pointer + (header_slot * REPLICA_COUNT) + replica_index;
     replica_ack_instance->version_number = version_number;
     replica_ack_instance->index_entry_written = -1;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = ack_type;
     _mm_sfence();
 }
@@ -499,6 +500,7 @@ static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *r
 
     uint64_t ack_finalize_start_ns = perf_now_ns();
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     uint64_t ack_finalize_ns = perf_now_ns() - ack_finalize_start_ns;
     record_start_ns = perf_now_ns();
@@ -542,6 +544,7 @@ static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_point
     perf_record_ns_bytes(PROF_SERVER_GET2_COPY, perf_now_ns() - copy_start_ns, transfer_length);
     replica_ack_instance->index_entry_written = -1;
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     perf_record_ns(PROF_SERVER_GET2_ACK_TOTAL, perf_now_ns() - total_start_ns);
 }
