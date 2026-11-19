@@ -47,7 +47,7 @@ typedef struct {
     uint32_t payload_hash; // The payload hash is just hash(keyhash valuehash)
     size_t offset;
     size_t return_offset;
-    uint16_t padding; // Pad up to 256 to allow vector ops
+    uint32_t request_tag; // Echoed in GET acks so a late ack for an earlier request is never taken for this one
     enum header_slot_status status;
 } header_slot_t;
 

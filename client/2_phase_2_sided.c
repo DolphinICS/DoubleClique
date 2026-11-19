@@ -69,6 +69,7 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
         ack_slot->starting_ack_data_offset,
         WRITE_BACK_REPLICA, // TODO: use 'best' replica
         key_hash,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_GET_PHASE1
     );
     perf_record_ns(PROF_CLIENT_GET2_SEND_PHASE1, perf_now_ns() - send_start_ns);
@@ -149,6 +150,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     for (uint32_t replica_index = 0; replica_index < REPLICA_COUNT; replica_index++) {
         replica_ack_t *replica_ack_instance = ack_slot->replica_ack_instances[replica_index];
         enum replica_ack_type ack_type = replica_ack_instance->replica_ack_type;
+        __asm__ volatile("" ::: "memory");
+        if (replica_ack_instance->version_number != ack_slot->request_tag) continue;
 
         if (ack_type != REPLICA_NOT_ACKED)
             ack_count++;
@@ -394,12 +397,14 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
     }
 
     // We only use the index 0 of the replica slots no matter the index, as this put was only sent to a single replica
-    if (ack_slot->replica_ack_instances[0]->replica_ack_type == REPLICA_NOT_ACKED) {
+    enum replica_ack_type phase2_ack_type = ack_slot->replica_ack_instances[0]->replica_ack_type;
+    __asm__ volatile("" ::: "memory");
+    if (phase2_ack_type == REPLICA_NOT_ACKED || ack_slot->replica_ack_instances[0]->version_number != ack_slot->request_tag) {
         uint64_t result_start_ns = perf_now_ns();
         GET2_PHASE2_RETURN(false, result_start_ns);
     }
 
-    if (ack_slot->replica_ack_instances[0]->replica_ack_type != REPLICA_ACK_SUCCESS) {
+    if (phase2_ack_type != REPLICA_ACK_SUCCESS) {
         uint64_t result_start_ns = perf_now_ns();
         fprintf(stderr, "Unsupported ack state for phase2\n");
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
@@ -453,6 +458,7 @@ void send_phase_2_get(uint32_t version_number, uint32_t replica_index, uint8_t k
         ack_slot->starting_ack_data_offset,
         (uint8_t) replica_index,
         0,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_GET_PHASE2
     );
 }

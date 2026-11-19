@@ -31,10 +31,10 @@ static struct buddy *buddy = NULL;
 static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
                          uint32_t version_number, enum replica_ack_type ack_type);
 
-static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 uint32_t key_hash, char *index_region, bool write_back, size_t write_back_offset, char *data_region);
 
-static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, const char *data_pointer,
+static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag, const char *data_pointer,
                                 uint32_t transfer_length, size_t return_offset);
 
 static void put(request_region_poller_thread_args_t *args, header_slot_t slot, uint32_t current_head_slot,
@@ -354,7 +354,7 @@ int request_region_poller(void *arg) {
                             perf_record_ns(PROF_SERVER_POLL_DISPATCH_GET1, perf_now_ns() - dispatch_get1_start_ns);
                             break;
                         }
-                        send_get_ack_phase1(args->replica_number, replica_ack, current_head_slot, key_hash,
+                        send_get_ack_phase1(args->replica_number, replica_ack, current_head_slot, slot.request_tag, key_hash,
                                             args->index_region, args->replica_number == slot.replica_write_back_hint,
                                             slot.return_offset, args->data_region);
                         perf_record_ns(PROF_SERVER_POLL_DISPATCH_GET1, perf_now_ns() - dispatch_get1_start_ns);
@@ -364,7 +364,7 @@ int request_region_poller(void *arg) {
                     {
                         uint64_t dispatch_get2_start_ns = perf_now_ns();
                         if (slot.replica_write_back_hint == args->replica_number) {
-                            send_get_ack_phase2(replica_ack, current_head_slot, ((char *) args->data_region) + slot.offset,
+                            send_get_ack_phase2(replica_ack, current_head_slot, slot.request_tag, ((char *) args->data_region) + slot.offset,
                                                 slot.key_length + slot.value_length + sizeof(uint32_t), slot.return_offset);
                         } else {
                             request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
@@ -417,7 +417,7 @@ static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_
     _mm_sfence();
 }
 
-static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 uint32_t key_hash, char *index_region, bool write_back,
                                 size_t write_back_offset, char *data_region) {
     uint64_t total_start_ns = perf_now_ns();
@@ -502,6 +502,7 @@ static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *r
 
     uint64_t ack_finalize_start_ns = perf_now_ns();
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    replica_ack_instance->version_number = request_tag;
     _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     uint64_t ack_finalize_ns = perf_now_ns() - ack_finalize_start_ns;
@@ -535,7 +536,7 @@ static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *r
     perf_record_ns(PROF_SERVER_GET1_ACK_TOTAL, total_ns);
 }
 
-static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 const char *data_pointer, uint32_t transfer_length, size_t return_offset) {
     uint64_t total_start_ns = perf_now_ns();
     volatile replica_ack_t *replica_ack_instance = replica_ack_remote_pointer + (header_slot * REPLICA_COUNT);
@@ -546,6 +547,7 @@ static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_point
     perf_record_ns_bytes(PROF_SERVER_GET2_COPY, perf_now_ns() - copy_start_ns, transfer_length);
     replica_ack_instance->index_entry_written = -1;
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    replica_ack_instance->version_number = request_tag;
     _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     perf_record_ns(PROF_SERVER_GET2_ACK_TOTAL, perf_now_ns() - total_start_ns);

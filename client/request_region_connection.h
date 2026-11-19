@@ -18,6 +18,7 @@ void send_request_region_slot(
     size_t return_offset,
     uint8_t replica_write_back_hint,
     uint32_t payload_hash,
+    uint32_t request_tag,
     enum header_slot_status status
 );
 #endif //DOUBLECLIQUE_REQUEST_REGION_CONNECTION_H

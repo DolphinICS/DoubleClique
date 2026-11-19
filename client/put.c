@@ -96,6 +96,7 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
         0,
         0,
         payload_hash,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_PUT
     );
     perf_record_ns(PROF_CLIENT_PUT_SEND_HEADER, perf_now_ns() - send_start_ns);

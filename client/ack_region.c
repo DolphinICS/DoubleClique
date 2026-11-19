@@ -81,6 +81,9 @@ void init_ack_region(sci_desc_t sd) {
 }
 
 // Critical region function
+// Only touched by submitters, which hold the submit lock
+static uint32_t next_request_tag = 0;
+
 ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_len, uint32_t value_len, uint32_t header_data_length, uint32_t ack_data_length, uint32_t version_number, request_promise_t *promise) {
     uint64_t alloc_start_ns = perf_now_ns();
     uint64_t queue_wait_ns = 0;
@@ -180,6 +183,8 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
             ack_slot->key_len = key_len;
             ack_slot->value_len = value_len;
             ack_slot->version_number = version_number;
+            next_request_tag = (next_request_tag + 1) & 0x7fffffff;
+            ack_slot->request_tag = 0x80000000u | next_request_tag;
             slot_prep_ns += perf_now_ns() - slot_prep_start_ns;
 
             // Wait for enough space

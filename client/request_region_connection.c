@@ -89,6 +89,7 @@ void send_request_region_slot(
     size_t return_offset,
     uint8_t replica_write_back_hint,
     uint32_t payload_hash,
+    uint32_t request_tag,
     enum header_slot_status status
 ) {
     uint64_t send_start_ns = perf_now_ns();
@@ -101,6 +102,7 @@ void send_request_region_slot(
     local_slot.return_offset = return_offset;
     local_slot.replica_write_back_hint = replica_write_back_hint;
     local_slot.payload_hash = payload_hash;
+    local_slot.request_tag = request_tag;
 
     memcpy_nt_avx2(slot,
         &local_slot,

@@ -49,6 +49,7 @@ typedef struct {
     uint32_t starting_ack_data_offset;
     uint32_t ack_data_size;
     uint32_t key_hash; // Only valid for GET_PHASE1 request types
+    uint32_t request_tag;
     replica_ack_t *replica_ack_instances[REPLICA_COUNT];
 } ack_slot_t;
 
