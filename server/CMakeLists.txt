@@ -6,8 +6,6 @@ add_executable(server main.c
         profiler_metrics.h
         profiler_report_layout.c
         profiler_report_layout.h
-        garbage_collection.c
-        garbage_collection.h
         garbage_collection_queue.c
         garbage_collection_queue.h)
 

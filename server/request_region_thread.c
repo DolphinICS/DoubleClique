@@ -20,7 +20,6 @@
 #include "buddy_alloc.h"
 #include "request_region_utils.h"
 #include "garbage_collection_queue.h"
-#include "garbage_collection.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 #include "profiler_report_layout.h"
@@ -30,6 +29,19 @@ static struct buddy *buddy = NULL;
 
 static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
                          uint32_t version_number, enum replica_ack_type ack_type);
+
+// Free data slots whose grace period has passed, on this thread so the allocator is never used concurrently
+static void collect_due_garbage(queue_t *queue) {
+    if (queue_empty(queue)) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    while (!queue_empty(queue)) {
+        queue_item_t *item = &queue->buffer[queue->tail];
+        if (item->t.tv_sec > now.tv_sec || (item->t.tv_sec == now.tv_sec && item->t.tv_nsec > now.tv_nsec)) break;
+        buddy_free(buddy, item->buddy_allocated_addr);
+        dequeue(queue);
+    }
+}
 
 static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 uint32_t key_hash, char *index_region, bool write_back, size_t write_back_offset, char *data_region);
@@ -178,6 +190,9 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
             queue_item.t.tv_nsec = (long)nsec;
 
             uint64_t gc_enqueue_call_start_ns = perf_now_ns();
+            if (queue_full(queue)) {
+                buddy_free(buddy, dequeue(queue).buddy_allocated_addr);
+            }
             enqueue(queue, queue_item);
             perf_record_ns(PROF_SERVER_PUT_GC_ENQUEUE_CALL, perf_now_ns() - gc_enqueue_call_start_ns);
             perf_record_ns(PROF_SERVER_PUT_GC_ENQUEUE, perf_now_ns() - gc_enqueue_start_ns);
@@ -226,22 +241,6 @@ int request_region_poller(void *arg) {
         exit(EXIT_FAILURE);
     }
     queue_init(queue);
-
-    garbage_collection_thread_args_t *garbage_collection_thread_args = malloc(sizeof(garbage_collection_thread_args_t));
-    if (garbage_collection_thread_args == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    garbage_collection_thread_args->queue = queue;
-    garbage_collection_thread_args->buddy = buddy;
-
-    pthread_t gc_thread_id;
-    pthread_create(
-            &gc_thread_id,
-            NULL,
-            garbage_collection_thread,
-            garbage_collection_thread_args);
 
     // Set up buddy allocator
     void *buddy_metadata = malloc(buddy_sizeof(DATA_REGION_SIZE));
@@ -301,6 +300,8 @@ int request_region_poller(void *arg) {
          * sync up, as when we hit a slot that we actually need to do something with, the next in the loop will be ready
          * when we continue;.
          */
+        collect_due_garbage(queue);
+
         for (uint32_t current_head_slot = 0; current_head_slot < REQUEST_SLOTS; current_head_slot++) {
             // Status first: the client writes the fields, fences, then the status, so fields read after a used
             // status are the new ones. Reading them in one struct copy can return the previous request's fields.
