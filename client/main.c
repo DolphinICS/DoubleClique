@@ -392,8 +392,8 @@ int main(int argc, char *argv[]) {
     request_promise_t *promise;
 
 
-    for (unsigned char i = 0; i < VALUE_LEN; i++) {
-        sample_data[i] = i;
+    for (uint32_t i = 0; i < VALUE_LEN; i++) {
+        sample_data[i] = (unsigned char) i;
     }
 
     printf("Loading table that has %lu index buckets\n", INDEX_BUCKETS);
