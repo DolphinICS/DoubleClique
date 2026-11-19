@@ -48,10 +48,18 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
     volatile char *data_region_start = ((volatile char *) request_region) + sizeof(request_region_t);
 
     uint64_t hash_buf_alloc_start_ns = perf_now_ns();
-    char *hash_data = malloc(key_len + value_len + sizeof(((header_slot_t *) 0)->version_number));
-    if (hash_data == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
+    // Reused per thread: key | value | version, the layout the payload hash covers
+    static __thread char *hash_data = NULL;
+    static __thread size_t hash_data_size = 0;
+    size_t hash_data_needed = (size_t) key_len + value_len + sizeof(((header_slot_t *) 0)->version_number);
+    if (hash_data_needed > hash_data_size) {
+        free(hash_data);
+        hash_data = malloc(hash_data_needed);
+        if (hash_data == NULL) {
+            perror("malloc");
+            exit(EXIT_FAILURE);
+        }
+        hash_data_size = hash_data_needed;
     }
     perf_record_ns(PROF_CLIENT_PUT_HASH_BUF_ALLOC, perf_now_ns() - hash_buf_alloc_start_ns);
 
@@ -84,7 +92,6 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
         perf_now_ns() - hash_start_ns,
         (uint64_t) key_len + value_len + sizeof(((header_slot_t *) 0)->version_number)
     );
-    free(hash_data);
 
     uint64_t send_start_ns = perf_now_ns();
     send_request_region_slot(

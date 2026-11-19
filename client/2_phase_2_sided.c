@@ -36,27 +36,20 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
     volatile char *data_region_start = ((volatile char *) request_region) + sizeof(request_region_t);
 
     uint64_t hash_buf_alloc_start_ns = perf_now_ns();
-    char *hash_data = malloc(key_len);
-    if (hash_data == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
     perf_record_ns(PROF_CLIENT_GET2_HASH_BUF_ALLOC, perf_now_ns() - hash_buf_alloc_start_ns);
 
     uint64_t copy_start_ns = perf_now_ns();
 
     // First copy the key
     for (uint32_t i = 0; i < key_len; i++) {
-        hash_data[i] = key[i];
         data_region_start[current_offset] = key[i];
         current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
     }
     perf_record_ns_bytes(PROF_CLIENT_GET2_COPY, perf_now_ns() - copy_start_ns, key_len);
 
     uint64_t hash_start_ns = perf_now_ns();
-    uint32_t key_hash = super_fast_hash(hash_data, (int) (key_len));
+    uint32_t key_hash = super_fast_hash(key, (int) (key_len));
     perf_record_ns_bytes(PROF_CLIENT_GET2_HASH, perf_now_ns() - hash_start_ns, key_len);
-    free(hash_data);
 
     ack_slot->key_hash = key_hash;
 
