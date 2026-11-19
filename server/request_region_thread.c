@@ -65,11 +65,13 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
     memcpy(hash_data, key, slot.key_length);
 
     // Copy value to both data and hash_data
-    for (uint32_t i = 0; i < slot.value_length; i++) {
-        data[i] = data_slot_start[offset];
-        hash_data[i + slot.key_length] = data[i];  // Reuse the value we just read
-        offset = (offset + 1) % REQUEST_REGION_DATA_SIZE;
+    uint32_t first_len = (uint32_t) (REQUEST_REGION_DATA_SIZE - offset);
+    if (first_len > slot.value_length) first_len = slot.value_length;
+    memcpy_nt_avx2(data, data_slot_start + offset, first_len, CHUNK_SIZE);
+    if (slot.value_length > first_len) {
+        memcpy_nt_avx2(data + first_len, data_slot_start, slot.value_length - first_len, CHUNK_SIZE);
     }
+    memcpy(hash_data + slot.key_length, data, slot.value_length);
 
     memcpy(hash_data + slot.key_length + slot.value_length, &slot.version_number, sizeof(uint32_t));
     perf_record_ns_bytes(
