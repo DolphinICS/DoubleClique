@@ -220,6 +220,7 @@ ack_slot_t *get_ack_slot_blocking(enum request_type request_type, uint8_t key_le
 
             uint64_t commit_start_ns = perf_now_ns();
             clock_gettime(CLOCK_MONOTONIC, &ack_slot->start_time);
+            ack_slot->request_start = ack_slot->start_time;
 
             free_header_slot = (free_header_slot + 1) % REQUEST_SLOTS;
             commit_ns += perf_now_ns() - commit_start_ns;

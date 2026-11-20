@@ -39,6 +39,7 @@ enum request_type {
 
 typedef struct {
     struct timespec start_time;
+    struct timespec request_start; // A GET's second round keeps the first round's, so the duration covers both
     volatile header_slot_t *header_slot_WRITE_ONLY;
     enum request_type request_type;
     request_promise_t *promise;
