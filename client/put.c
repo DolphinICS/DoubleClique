@@ -7,6 +7,7 @@
 #include "request_region.h"
 #include "get_node_id.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "index_data_protocol.h"
 #include "request_region_connection.h"
 #include "ack_region.h"
@@ -86,7 +87,7 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
     );
 
     uint64_t hash_start_ns = perf_now_ns();
-    uint32_t payload_hash = super_fast_hash(hash_data,
+    uint32_t payload_hash = payload_hash_crc(hash_data,
                                             (uint32_t) (key_len + value_len + sizeof(((header_slot_t *) 0)->version_number)));
     perf_record_ns_bytes(
         PROF_CLIENT_PUT_HASH,

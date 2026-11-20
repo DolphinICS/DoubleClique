@@ -7,6 +7,7 @@
 #include "avx_cpy.h"
 #include "request_region_connection.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "2_phase_1_sided.h"
 #include "phase_2_queue.h"
 #include "sequence.h"
@@ -304,7 +305,7 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                     uint32_t expected_hash = *((uint32_t *) (ack_data + key_len + value_len));
                     *((uint32_t *) (ack_data + key_len + value_len)) = found_candidates[candidate_index].version_number;
 
-                    uint32_t hash = super_fast_hash(ack_data, (uint32_t) (key_len + value_len + sizeof(uint32_t)));
+                    uint32_t hash = payload_hash_crc(ack_data, (uint32_t) (key_len + value_len + sizeof(uint32_t)));
                     if (hash == expected_hash) {
                         ack_slot->promise->data = malloc(value_len);
                         if (ack_slot->promise->data == NULL) {
@@ -438,7 +439,7 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
     uint32_t expected_hash = *((uint32_t *) (ack_data + ack_slot->key_len + ack_slot->value_len));
     *((uint32_t *) (ack_data + ack_slot->key_len + ack_slot->value_len)) = ack_slot->version_number;
 
-    uint32_t hash = super_fast_hash(ack_data, (uint32_t) (ack_slot->key_len + ack_slot->value_len + sizeof(uint32_t)));
+    uint32_t hash = payload_hash_crc(ack_data, (uint32_t) (ack_slot->key_len + ack_slot->value_len + sizeof(uint32_t)));
     if (hash != expected_hash) {
         //TODO: This seems like a bug, as we could have shipped multiple phase2 requests.
         uint64_t result_start_ns = perf_now_ns();

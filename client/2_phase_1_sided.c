@@ -10,6 +10,7 @@
 #include "index_data_protocol.h"
 
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 
@@ -544,7 +545,7 @@ preferred_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) sc
         uint32_t expected_payload_hash = *((uint32_t *) (data_slot + args->key_len + data_length));
         *((uint32_t *) (data_slot + args->key_len + data_length)) = (uint32_t) version_number;
 
-        uint32_t payload_hash = super_fast_hash(data_slot, (uint32_t) (args->key_len + data_length +
+        uint32_t payload_hash = payload_hash_crc(data_slot, (uint32_t) (args->key_len + data_length +
                                                                   sizeof(((header_slot_t *) 0)->version_number)));
 
         if (payload_hash != expected_payload_hash) {
@@ -781,7 +782,7 @@ contingency_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) 
         uint32_t expected_payload_hash = *((uint32_t *) (slot + args->index_entry.key_length + data_length));
         *((uint32_t *) (slot + args->index_entry.key_length + data_length)) = (uint32_t) args->index_entry.version_number;
 
-        uint32_t payload_hash = super_fast_hash(slot, (uint32_t) (args->index_entry.key_length + data_length +
+        uint32_t payload_hash = payload_hash_crc(slot, (uint32_t) (args->index_entry.key_length + data_length +
                                                                   sizeof(((header_slot_t *) 0)->version_number)));
 
         if (payload_hash != expected_payload_hash) {

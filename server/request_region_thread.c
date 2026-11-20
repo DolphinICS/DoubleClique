@@ -11,6 +11,7 @@
 #include "request_region.h"
 #include "sisci_glob_defs.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "avx_cpy.h"
 
 #include "index_data_protocol.h"
@@ -96,7 +97,7 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
     );
 
     uint64_t hash_verify_start_ns = perf_now_ns();
-    uint32_t payload_hash = super_fast_hash(hash_data, (uint32_t) (slot.key_length + slot.value_length + sizeof(uint32_t)));
+    uint32_t payload_hash = payload_hash_crc(hash_data, (uint32_t) (slot.key_length + slot.value_length + sizeof(uint32_t)));
     perf_record_ns_bytes(
         PROF_SERVER_PUT_HASH_VERIFY,
         perf_now_ns() - hash_verify_start_ns,
