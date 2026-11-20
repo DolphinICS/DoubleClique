@@ -7,8 +7,14 @@
 
 // Single producer (ack thread), single consumer (phase 2 thread), both spin instead of sleeping
 static queue_item_t *buffer;
-static _Atomic size_t head;
-static _Atomic size_t tail;
+// Each index on a cache line of its own, the idle consumer polls head while other threads write nearby data
+static struct {
+    _Alignas(64) _Atomic size_t head;
+    _Alignas(64) _Atomic size_t tail;
+    _Alignas(64) char end_padding;
+} indexes;
+#define head indexes.head
+#define tail indexes.tail
 
 void enqueue(queue_item_t item) {
     size_t current_head = atomic_load_explicit(&head, memory_order_relaxed);
