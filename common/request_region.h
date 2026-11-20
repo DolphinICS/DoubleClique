@@ -8,7 +8,7 @@
 #include "sisci_glob_defs.h"
 #include "index_data_protocol.h"
 
-#define REQUEST_SLOTS 50000
+#define REQUEST_SLOTS 1024
 #define REQUEST_SEGMENT_ID 1
 #define MAX_VERSION_NUMBER 0x1000000
 // The largest version number is 2**24 as the top 8 bits are used for the replica node id
@@ -47,7 +47,7 @@ typedef struct {
     uint32_t payload_hash; // The payload hash is just hash(keyhash valuehash)
     size_t offset;
     size_t return_offset;
-    uint16_t padding; // Pad up to 256 to allow vector ops
+    uint32_t request_tag; // Echoed in GET acks so a late ack for an earlier request is never taken for this one
     enum header_slot_status status;
 } header_slot_t;
 

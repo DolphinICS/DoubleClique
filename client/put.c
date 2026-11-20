@@ -7,10 +7,12 @@
 #include "request_region.h"
 #include "get_node_id.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "index_data_protocol.h"
 #include "request_region_connection.h"
 #include "ack_region.h"
 #include "sequence.h"
+#include "avx_cpy.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 
@@ -47,27 +49,33 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
     volatile char *data_region_start = ((volatile char *) request_region) + sizeof(request_region_t);
 
     uint64_t hash_buf_alloc_start_ns = perf_now_ns();
-    char *hash_data = malloc(key_len + value_len + sizeof(((header_slot_t *) 0)->version_number));
-    if (hash_data == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
+    // Reused per thread: key | value | version, the layout the payload hash covers
+    static __thread char *hash_data = NULL;
+    static __thread size_t hash_data_size = 0;
+    size_t hash_data_needed = (size_t) key_len + value_len + sizeof(((header_slot_t *) 0)->version_number);
+    if (hash_data_needed > hash_data_size) {
+        free(hash_data);
+        hash_data = malloc(hash_data_needed);
+        if (hash_data == NULL) {
+            perror("malloc");
+            exit(EXIT_FAILURE);
+        }
+        hash_data_size = hash_data_needed;
     }
     perf_record_ns(PROF_CLIENT_PUT_HASH_BUF_ALLOC, perf_now_ns() - hash_buf_alloc_start_ns);
 
     uint64_t copy_start_ns = perf_now_ns();
 
-    // First copy the key
-    for (uint32_t i = 0; i < key_len; i++) {
-        hash_data[i] = key[i];
-        data_region_start[current_offset] = key[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
-    }
-
-    // Next copy the data
-    for (uint32_t i = 0; i < value_len; i++) {
-        hash_data[i + key_len] = ((char *) value)[i];
-        data_region_start[current_offset] = ((char *) value)[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
+    // Stage key and value, then copy to the request region in at most two blocks (split at the wrap)
+    memcpy(hash_data, key, key_len);
+    memcpy(hash_data + key_len, value, value_len);
+    uint32_t payload_len = (uint32_t) key_len + value_len;
+    uint32_t first_len = (uint32_t) REQUEST_REGION_DATA_SIZE - current_offset;
+    if (first_len > payload_len) first_len = payload_len;
+    // send_request_region_slot fences before the status store, which orders this payload too
+    memcpy_nt_avx2_unfenced(data_region_start + current_offset, hash_data, first_len, CHUNK_SIZE);
+    if (payload_len > first_len) {
+        memcpy_nt_avx2_unfenced(data_region_start, hash_data + first_len, payload_len - first_len, CHUNK_SIZE);
     }
 
     // Copy version number into the first 4 bytes of hash_data
@@ -79,14 +87,13 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
     );
 
     uint64_t hash_start_ns = perf_now_ns();
-    uint32_t payload_hash = super_fast_hash(hash_data,
+    uint32_t payload_hash = payload_hash_crc(hash_data,
                                             (uint32_t) (key_len + value_len + sizeof(((header_slot_t *) 0)->version_number)));
     perf_record_ns_bytes(
         PROF_CLIENT_PUT_HASH,
         perf_now_ns() - hash_start_ns,
         (uint64_t) key_len + value_len + sizeof(((header_slot_t *) 0)->version_number)
     );
-    free(hash_data);
 
     uint64_t send_start_ns = perf_now_ns();
     send_request_region_slot(
@@ -98,6 +105,7 @@ request_promise_t *put_blocking_until_available_put_request_region_slot(const ch
         0,
         0,
         payload_hash,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_PUT
     );
     perf_record_ns(PROF_CLIENT_PUT_SEND_HEADER, perf_now_ns() - send_start_ns);
@@ -157,8 +165,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
     if (quorum_reached) {
         uint64_t result_start_ns = perf_now_ns();
         // Success!
-        ack_slot->promise->result = PROMISE_SUCCESS;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_SUCCESS;
         result_ns += perf_now_ns() - result_start_ns;
         PUT_POLL_RETURN(true);
     }
@@ -188,8 +196,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
         if (mix) {
             control_flow_ns += perf_now_ns() - control_start_ns;
             uint64_t result_start_ns = perf_now_ns();
-            ack_slot->promise->result = PROMISE_ERROR_MIX;
             insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+            ack_slot->promise->result = PROMISE_ERROR_MIX;
             result_ns += perf_now_ns() - result_start_ns;
             PUT_POLL_RETURN(true);
         }
@@ -225,8 +233,8 @@ bool consume_put_ack_slot(ack_slot_t *ack_slot) {
     if (timed_out) {
         control_flow_ns += perf_now_ns() - control_start_ns;
         uint64_t result_start_ns = perf_now_ns();
-        ack_slot->promise->result = PROMISE_TIMEOUT;
         insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
+        ack_slot->promise->result = PROMISE_TIMEOUT;
         result_ns += perf_now_ns() - result_start_ns;
         PUT_POLL_RETURN(true);
     }

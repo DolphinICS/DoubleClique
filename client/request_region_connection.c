@@ -1,3 +1,4 @@
+#include <immintrin.h>
 #include "request_region_connection.h"
 
 #include <sisci_types.h>
@@ -89,6 +90,7 @@ void send_request_region_slot(
     size_t return_offset,
     uint8_t replica_write_back_hint,
     uint32_t payload_hash,
+    uint32_t request_tag,
     enum header_slot_status status
 ) {
     uint64_t send_start_ns = perf_now_ns();
@@ -101,6 +103,7 @@ void send_request_region_slot(
     local_slot.return_offset = return_offset;
     local_slot.replica_write_back_hint = replica_write_back_hint;
     local_slot.payload_hash = payload_hash;
+    local_slot.request_tag = request_tag;
 
     memcpy_nt_avx2(slot,
         &local_slot,
@@ -108,7 +111,8 @@ void send_request_region_slot(
         CHUNK_SIZE);
     
     slot->status = status;
-    // TODO: potentially an sfence here
+    // Push the status out of the write combining buffer now rather than whenever it drains
+    _mm_sfence();
 
     perf_record_ns_bytes(
         PROF_CLIENT_SEND_HEADER,

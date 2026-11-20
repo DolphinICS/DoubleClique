@@ -4,8 +4,10 @@
 #include <sisci_api.h>
 #include "2_phase_2_sided.h"
 #include "ack_region.h"
+#include "avx_cpy.h"
 #include "request_region_connection.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "2_phase_1_sided.h"
 #include "phase_2_queue.h"
 #include "sequence.h"
@@ -36,27 +38,23 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
     volatile char *data_region_start = ((volatile char *) request_region) + sizeof(request_region_t);
 
     uint64_t hash_buf_alloc_start_ns = perf_now_ns();
-    char *hash_data = malloc(key_len);
-    if (hash_data == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
     perf_record_ns(PROF_CLIENT_GET2_HASH_BUF_ALLOC, perf_now_ns() - hash_buf_alloc_start_ns);
 
     uint64_t copy_start_ns = perf_now_ns();
 
     // First copy the key
-    for (uint32_t i = 0; i < key_len; i++) {
-        hash_data[i] = key[i];
-        data_region_start[current_offset] = key[i];
-        current_offset = (current_offset + 1) % REQUEST_REGION_DATA_SIZE;
+    // send_request_region_slot fences before the status store, which orders the key too
+    uint32_t first_len = (uint32_t) REQUEST_REGION_DATA_SIZE - current_offset;
+    if (first_len > key_len) first_len = key_len;
+    memcpy_nt_avx2_unfenced(data_region_start + current_offset, key, first_len, CHUNK_SIZE);
+    if (key_len > first_len) {
+        memcpy_nt_avx2_unfenced(data_region_start, key + first_len, key_len - first_len, CHUNK_SIZE);
     }
     perf_record_ns_bytes(PROF_CLIENT_GET2_COPY, perf_now_ns() - copy_start_ns, key_len);
 
     uint64_t hash_start_ns = perf_now_ns();
-    uint32_t key_hash = super_fast_hash(hash_data, (int) (key_len));
+    uint32_t key_hash = super_fast_hash(key, (int) (key_len));
     perf_record_ns_bytes(PROF_CLIENT_GET2_HASH, perf_now_ns() - hash_start_ns, key_len);
-    free(hash_data);
 
     ack_slot->key_hash = key_hash;
 
@@ -69,6 +67,7 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
         ack_slot->starting_ack_data_offset,
         WRITE_BACK_REPLICA, // TODO: use 'best' replica
         key_hash,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_GET_PHASE1
     );
     perf_record_ns(PROF_CLIENT_GET2_SEND_PHASE1, perf_now_ns() - send_start_ns);
@@ -76,6 +75,18 @@ request_promise_t *get_2_phase_2_sided(const char *key, uint8_t key_len) {
     perf_record_ns(PROF_CLIENT_GET2_PHASE1_TOTAL, perf_now_ns() - total_start_ns);
 
     return ack_slot->promise;
+}
+
+static bool phase1_quorum_acked(ack_slot_t *ack_slot) {
+    uint32_t success = 0;
+    for (uint32_t replica_index = 0; replica_index < REPLICA_COUNT; replica_index++) {
+        replica_ack_t *replica_ack_instance = ack_slot->replica_ack_instances[replica_index];
+        enum replica_ack_type ack_type = replica_ack_instance->replica_ack_type;
+        __asm__ volatile("" ::: "memory");
+        if (replica_ack_instance->version_number != ack_slot->request_tag) continue;
+        if (ack_type == REPLICA_ACK_SUCCESS) success++;
+    }
+    return success >= (REPLICA_COUNT + 1) / 2;
 }
 
 bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
@@ -128,11 +139,11 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     timeout_check_ns += perf_now_ns() - timeout_check_start_ns;
 
     uint64_t decision_start_ns = perf_now_ns();
-    if (timed_out) {
+    if (timed_out && !phase1_quorum_acked(ack_slot)) {
         decision_timeout_ns += perf_now_ns() - decision_start_ns;
         uint64_t result_start_ns = perf_now_ns();
+        insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
         ack_slot->promise->result = PROMISE_TIMEOUT;
-        insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
         get_2_sided_decrement();
         GET2_PHASE1_RETURN(true, result_start_ns);
     }
@@ -149,6 +160,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
     for (uint32_t replica_index = 0; replica_index < REPLICA_COUNT; replica_index++) {
         replica_ack_t *replica_ack_instance = ack_slot->replica_ack_instances[replica_index];
         enum replica_ack_type ack_type = replica_ack_instance->replica_ack_type;
+        __asm__ volatile("" ::: "memory");
+        if (replica_ack_instance->version_number != ack_slot->request_tag) continue;
 
         if (ack_type != REPLICA_NOT_ACKED)
             ack_count++;
@@ -247,14 +260,20 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                 decision_ns += perf_now_ns() - decision_start_ns;
                 uint64_t result_start_ns = perf_now_ns();
                 // If we have gotten replies from all replicas and can not find a quorum, it is an error
+                insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
                 ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
-                insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
                 get_2_sided_decrement();
                 GET2_PHASE1_RETURN(true, result_start_ns);
             } else {
                 decision_ns += perf_now_ns() - decision_start_ns;
                 // We did not find any candidates, so we do not want to consume yet wait for more acks to arrive
                 uint64_t result_start_ns = perf_now_ns();
+                if (timed_out) {
+                    insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
+                    ack_slot->promise->result = PROMISE_TIMEOUT;
+                    get_2_sided_decrement();
+                    GET2_PHASE1_RETURN(true, result_start_ns);
+                }
                 GET2_PHASE1_RETURN(false, result_start_ns);
             }
         }
@@ -286,7 +305,7 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                     uint32_t expected_hash = *((uint32_t *) (ack_data + key_len + value_len));
                     *((uint32_t *) (ack_data + key_len + value_len)) = found_candidates[candidate_index].version_number;
 
-                    uint32_t hash = super_fast_hash(ack_data, (uint32_t) (key_len + value_len + sizeof(uint32_t)));
+                    uint32_t hash = payload_hash_crc(ack_data, (uint32_t) (key_len + value_len + sizeof(uint32_t)));
                     if (hash == expected_hash) {
                         ack_slot->promise->data = malloc(value_len);
                         if (ack_slot->promise->data == NULL) {
@@ -297,8 +316,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                         //TODO: Full key verification?
 
                         memcpy(ack_slot->promise->data, ack_data + key_len, value_len);
+                        insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
                         ack_slot->promise->result = PROMISE_SUCCESS_PH1;
-                        insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
                         get_2_sided_decrement();
                         fastpath_verify_ns += perf_now_ns() - verify_start_ns;
                         uint64_t select_total_ns = perf_now_ns() - select_start_ns;
@@ -323,6 +342,7 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
                 queue_item.value_len = value_len;
                 queue_item.server_data_offset = server_data_offset;
                 queue_item.promise = ack_slot->promise;
+                queue_item.request_start = ack_slot->request_start;
 
                 enqueue(queue_item);
                 shipped++;
@@ -350,8 +370,8 @@ bool consume_get_ack_slot_phase1(ack_slot_t *ack_slot) {
         if (shipped == 0) {
             decision_ns += perf_now_ns() - decision_start_ns;
             uint64_t result_start_ns = perf_now_ns();
+            insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
             ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
-            insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
             get_2_sided_decrement();
             GET2_PHASE1_RETURN(true, result_start_ns);
         }
@@ -386,24 +406,29 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
         ((end_p.tv_sec - ack_slot->start_time.tv_sec) * 1000000000L + (end_p.tv_nsec - ack_slot->start_time.tv_nsec)) >= GET_TIMEOUT_2_SIDED_NS;
     perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_TIMEOUT_CHECK, perf_now_ns() - timeout_check_start_ns);
 
-    if (timed_out) {
+    bool phase2_acked = ack_slot->replica_ack_instances[0]->replica_ack_type != REPLICA_NOT_ACKED;
+    __asm__ volatile("" ::: "memory");
+    phase2_acked = phase2_acked && ack_slot->replica_ack_instances[0]->version_number == ack_slot->request_tag;
+    if (timed_out && !phase2_acked) {
         uint64_t result_start_ns = perf_now_ns();
+        insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
         ack_slot->promise->result = PROMISE_TIMEOUT;
-        insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
 
     // We only use the index 0 of the replica slots no matter the index, as this put was only sent to a single replica
-    if (ack_slot->replica_ack_instances[0]->replica_ack_type == REPLICA_NOT_ACKED) {
+    enum replica_ack_type phase2_ack_type = ack_slot->replica_ack_instances[0]->replica_ack_type;
+    __asm__ volatile("" ::: "memory");
+    if (phase2_ack_type == REPLICA_NOT_ACKED || ack_slot->replica_ack_instances[0]->version_number != ack_slot->request_tag) {
         uint64_t result_start_ns = perf_now_ns();
         GET2_PHASE2_RETURN(false, result_start_ns);
     }
 
-    if (ack_slot->replica_ack_instances[0]->replica_ack_type != REPLICA_ACK_SUCCESS) {
+    if (phase2_ack_type != REPLICA_ACK_SUCCESS) {
         uint64_t result_start_ns = perf_now_ns();
         fprintf(stderr, "Unsupported ack state for phase2\n");
+        insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
         ack_slot->promise->result = PROMISE_ERROR_TRANSFER;
-        insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
 
@@ -414,12 +439,12 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
     uint32_t expected_hash = *((uint32_t *) (ack_data + ack_slot->key_len + ack_slot->value_len));
     *((uint32_t *) (ack_data + ack_slot->key_len + ack_slot->value_len)) = ack_slot->version_number;
 
-    uint32_t hash = super_fast_hash(ack_data, (uint32_t) (ack_slot->key_len + ack_slot->value_len + sizeof(uint32_t)));
+    uint32_t hash = payload_hash_crc(ack_data, (uint32_t) (ack_slot->key_len + ack_slot->value_len + sizeof(uint32_t)));
     if (hash != expected_hash) {
         //TODO: This seems like a bug, as we could have shipped multiple phase2 requests.
         uint64_t result_start_ns = perf_now_ns();
+        insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
         ack_slot->promise->result = PROMISE_ERROR_NO_MATCH;
-        insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
         perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_VERIFY_AND_COPY, perf_now_ns() - verify_and_copy_start_ns);
         GET2_PHASE2_RETURN(true, result_start_ns);
     }
@@ -432,8 +457,8 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
 
     //TODO: No full key verification?
     memcpy(ack_slot->promise->data, ack_data + ack_slot->key_len, ack_slot->value_len);
+    insert_duration_end_now(ack_slot->promise, ack_slot->request_start);
     ack_slot->promise->result = PROMISE_SUCCESS;
-    insert_duration_end_now(ack_slot->promise, ack_slot->start_time);
     perf_record_ns(PROF_CLIENT_GET2_ACK_PHASE2_VERIFY_AND_COPY, perf_now_ns() - verify_and_copy_start_ns);
     uint64_t result_start_ns = perf_now_ns();
     GET2_PHASE2_RETURN(true, result_start_ns);
@@ -441,8 +466,9 @@ bool consume_get_ack_slot_phase2(ack_slot_t *ack_slot) {
 #undef GET2_PHASE2_RETURN
 }
 
-void send_phase_2_get(uint32_t version_number, uint32_t replica_index, uint8_t key_len, uint32_t value_len, ptrdiff_t server_data_offset, request_promise_t *promise) {
+void send_phase_2_get(uint32_t version_number, uint32_t replica_index, uint8_t key_len, uint32_t value_len, ptrdiff_t server_data_offset, request_promise_t *promise, struct timespec request_start) {
     ack_slot_t *ack_slot = get_ack_slot_blocking(GET_PHASE2, key_len, value_len, 0, key_len + value_len + sizeof(uint32_t), version_number, promise);
+    ack_slot->request_start = request_start;
 
     send_request_region_slot(
         ack_slot->header_slot_WRITE_ONLY,
@@ -453,6 +479,7 @@ void send_phase_2_get(uint32_t version_number, uint32_t replica_index, uint8_t k
         ack_slot->starting_ack_data_offset,
         (uint8_t) replica_index,
         0,
+        ack_slot->request_tag,
         HEADER_SLOT_USED_GET_PHASE2
     );
 }
@@ -467,7 +494,8 @@ static void *phase2_thread(__attribute__((unused)) void *_args) {
                 queue_item.key_len,
                 queue_item.value_len,
                 queue_item.server_data_offset,
-                queue_item.promise);
+                queue_item.promise,
+                queue_item.request_start);
     }
 
     return NULL;

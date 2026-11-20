@@ -10,6 +10,7 @@
 #include "index_data_protocol.h"
 
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 
@@ -291,8 +292,8 @@ request_promise_t *get_2_phase_1_sided(const char *key, uint8_t key_len) {
                 }
             }
 
-            pending_get_status.promise->result = PROMISE_TIMEOUT;
             insert_duration(pending_get_status.promise, pending_get_status.start, ts);
+            pending_get_status.promise->result = PROMISE_TIMEOUT;
             timeout_cleanup_ns = perf_now_ns() - timeout_cleanup_start_ns;
             break;
         }
@@ -384,8 +385,8 @@ sci_callback_action_t index_fetch_completed_callback(void IN *arg, __attribute__
                    sizeof(*slot));
         }
     } else {
-        pending_get_status.promise->result = PROMISE_ERROR_TRANSFER;
         insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+        pending_get_status.promise->result = PROMISE_ERROR_TRANSFER;
         record_get1_callback_ns(PROF_CLIENT_GET1_INDEX_CALLBACK, perf_now_ns() - callback_start_ns);
         return SCI_CALLBACK_CONTINUE;
     }
@@ -544,7 +545,7 @@ preferred_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) sc
         uint32_t expected_payload_hash = *((uint32_t *) (data_slot + args->key_len + data_length));
         *((uint32_t *) (data_slot + args->key_len + data_length)) = (uint32_t) version_number;
 
-        uint32_t payload_hash = super_fast_hash(data_slot, (uint32_t) (args->key_len + data_length +
+        uint32_t payload_hash = payload_hash_crc(data_slot, (uint32_t) (args->key_len + data_length +
                                                                   sizeof(((header_slot_t *) 0)->version_number)));
 
         if (payload_hash != expected_payload_hash) {
@@ -559,8 +560,8 @@ preferred_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) sc
             exit(EXIT_FAILURE);
         }
         memcpy(pending_get_status.promise->data, data_slot + args->key_len, data_length);
-        pending_get_status.promise->result = PROMISE_SUCCESS;
         insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+        pending_get_status.promise->result = PROMISE_SUCCESS;
 
     } else {
         contingency_backend_fetch(tried_vnrs, tried_vnr_count, args->key, args->key_hash, args->key_len);
@@ -666,8 +667,8 @@ contingency_backend_fetch(const uint32_t already_tried_vnr[], uint32_t already_t
 
     if (found_contingency_candidates_count == 0) {
         // Did not find a quorum, fail the fetch
-        pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
         insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+        pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
         record_get1_callback_ns(PROF_CLIENT_GET1_CONTINGENCY_PREP, perf_now_ns() - prep_start_ns);
         return;
     }
@@ -764,8 +765,8 @@ contingency_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) 
         pthread_mutex_unlock(&completed_contingency_fetches_mutex);
 
         if (completed_contingency_fetches_count == args->found_contingency_candidates_count) {
-            pending_get_status.promise->result = PROMISE_ERROR_TRANSFER;
             insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+            pending_get_status.promise->result = PROMISE_ERROR_TRANSFER;
         }
 
         record_get1_callback_ns(PROF_CLIENT_GET1_CONTINGENCY_CB, perf_now_ns() - callback_start_ns);
@@ -781,12 +782,12 @@ contingency_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) 
         uint32_t expected_payload_hash = *((uint32_t *) (slot + args->index_entry.key_length + data_length));
         *((uint32_t *) (slot + args->index_entry.key_length + data_length)) = (uint32_t) args->index_entry.version_number;
 
-        uint32_t payload_hash = super_fast_hash(slot, (uint32_t) (args->index_entry.key_length + data_length +
+        uint32_t payload_hash = payload_hash_crc(slot, (uint32_t) (args->index_entry.key_length + data_length +
                                                                   sizeof(((header_slot_t *) 0)->version_number)));
 
         if (payload_hash != expected_payload_hash) {
-            pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
             insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+            pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
             record_get1_callback_ns(PROF_CLIENT_GET1_CONTINGENCY_CB, perf_now_ns() - callback_start_ns);
             return SCI_CALLBACK_CONTINUE;
         }
@@ -797,8 +798,8 @@ contingency_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) 
             exit(EXIT_FAILURE);
         }
         memcpy(pending_get_status.promise->data, slot + args->index_entry.key_length, data_length);
-        pending_get_status.promise->result = PROMISE_SUCCESS;
         insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+        pending_get_status.promise->result = PROMISE_SUCCESS;
     } else {
         // No match, if we have received all set error, if not just fall through and let another thread handle it
         pthread_mutex_lock(&completed_contingency_fetches_mutex);
@@ -811,8 +812,8 @@ contingency_data_fetch_completed_callback(void IN *arg, __attribute__((unused)) 
         pthread_mutex_unlock(&completed_contingency_fetches_mutex);
 
         if (completed_contingency_fetches_count == args->found_contingency_candidates_count) {
-            pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
             insert_duration_end_now(pending_get_status.promise, pending_get_status.start);
+            pending_get_status.promise->result = PROMISE_ERROR_NO_MATCH;
         }
     }
 

@@ -11,6 +11,7 @@
 #include "request_region.h"
 #include "sisci_glob_defs.h"
 #include "super_fast_hash.h"
+#include "payload_hash.h"
 #include "avx_cpy.h"
 
 #include "index_data_protocol.h"
@@ -20,7 +21,6 @@
 #include "buddy_alloc.h"
 #include "request_region_utils.h"
 #include "garbage_collection_queue.h"
-#include "garbage_collection.h"
 #include "profiler.h"
 #include "profiler_metrics.h"
 #include "profiler_report_layout.h"
@@ -31,10 +31,23 @@ static struct buddy *buddy = NULL;
 static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
                          uint32_t version_number, enum replica_ack_type ack_type);
 
-static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+// Free data slots whose grace period has passed, on this thread so the allocator is never used concurrently
+static void collect_due_garbage(queue_t *queue) {
+    if (queue_empty(queue)) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    while (!queue_empty(queue)) {
+        queue_item_t *item = &queue->buffer[queue->tail];
+        if (item->t.tv_sec > now.tv_sec || (item->t.tv_sec == now.tv_sec && item->t.tv_nsec > now.tv_nsec)) break;
+        buddy_free(buddy, item->buddy_allocated_addr);
+        dequeue(queue);
+    }
+}
+
+static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 uint32_t key_hash, char *index_region, bool write_back, size_t write_back_offset, char *data_region);
 
-static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, const char *data_pointer,
+static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag, const char *data_pointer,
                                 uint32_t transfer_length, size_t return_offset);
 
 static void put(request_region_poller_thread_args_t *args, header_slot_t slot, uint32_t current_head_slot,
@@ -48,27 +61,32 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
 
     char *data_slot_start = ((char *) request_region) + sizeof(request_region_t);
 
-    // Use a single allocation for both data and hash_data
-    size_t total_size = slot.value_length + slot.key_length + slot.value_length + sizeof(uint32_t);
-    char *combined_buffer = malloc(total_size);
-    if (combined_buffer == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
+    // Reused across PUTs (one thread): key | value | version, the layout the payload hash covers
+    static char *hash_data = NULL;
+    static size_t hash_data_size = 0;
+    size_t total_size = slot.key_length + slot.value_length + sizeof(uint32_t);
+    if (total_size > hash_data_size) {
+        free(hash_data);
+        hash_data = malloc(total_size);
+        if (hash_data == NULL) {
+            perror("malloc");
+            exit(EXIT_FAILURE);
+        }
+        hash_data_size = total_size;
     }
-
-    char *data = combined_buffer;
-    char *hash_data = combined_buffer + slot.value_length;
+    char *data = hash_data + slot.key_length;
 
     uint64_t read_copy_start_ns = perf_now_ns();
 
     // Copy key to hash_data
     memcpy(hash_data, key, slot.key_length);
 
-    // Copy value to both data and hash_data
-    for (uint32_t i = 0; i < slot.value_length; i++) {
-        data[i] = data_slot_start[offset];
-        hash_data[i + slot.key_length] = data[i];  // Reuse the value we just read
-        offset = (offset + 1) % REQUEST_REGION_DATA_SIZE;
+    // Copy the value in at most two blocks (split at the wrap), it is hashed right after so keep it cached
+    uint32_t first_len = (uint32_t) (REQUEST_REGION_DATA_SIZE - offset);
+    if (first_len > slot.value_length) first_len = slot.value_length;
+    memcpy(data, data_slot_start + offset, first_len);
+    if (slot.value_length > first_len) {
+        memcpy(data + first_len, data_slot_start, slot.value_length - first_len);
     }
 
     memcpy(hash_data + slot.key_length + slot.value_length, &slot.version_number, sizeof(uint32_t));
@@ -79,7 +97,7 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
     );
 
     uint64_t hash_verify_start_ns = perf_now_ns();
-    uint32_t payload_hash = super_fast_hash(hash_data, (uint32_t) (slot.key_length + slot.value_length + sizeof(uint32_t)));
+    uint32_t payload_hash = payload_hash_crc(hash_data, (uint32_t) (slot.key_length + slot.value_length + sizeof(uint32_t)));
     perf_record_ns_bytes(
         PROF_SERVER_PUT_HASH_VERIFY,
         perf_now_ns() - hash_verify_start_ns,
@@ -90,7 +108,6 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
         uint64_t mark_unused_start_ns = perf_now_ns();
         request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
         perf_record_ns(PROF_SERVER_PUT_MARK_HEADER_UNUSED, perf_now_ns() - mark_unused_start_ns);
-        free(combined_buffer);
         FINISH_PUT_RETURN();
     }
 
@@ -116,7 +133,6 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
             uint64_t mark_unused_start_ns = perf_now_ns();
             request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
             perf_record_ns(PROF_SERVER_PUT_MARK_HEADER_UNUSED, perf_now_ns() - mark_unused_start_ns);
-            free(data);
             FINISH_PUT_RETURN();
         }
 
@@ -134,7 +150,6 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
             uint64_t mark_unused_start_ns = perf_now_ns();
             request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
             perf_record_ns(PROF_SERVER_PUT_MARK_HEADER_UNUSED, perf_now_ns() - mark_unused_start_ns);
-            free(data);
             FINISH_PUT_RETURN();
         }
     } else {
@@ -154,7 +169,6 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
                 uint64_t mark_unused_start_ns = perf_now_ns();
                 request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
                 perf_record_ns(PROF_SERVER_PUT_MARK_HEADER_UNUSED, perf_now_ns() - mark_unused_start_ns);
-                free(data);
                 FINISH_PUT_RETURN();
             }
         } else {
@@ -176,6 +190,9 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
             queue_item.t.tv_nsec = (long)nsec;
 
             uint64_t gc_enqueue_call_start_ns = perf_now_ns();
+            if (queue_full(queue)) {
+                buddy_free(buddy, dequeue(queue).buddy_allocated_addr);
+            }
             enqueue(queue, queue_item);
             perf_record_ns(PROF_SERVER_PUT_GC_ENQUEUE_CALL, perf_now_ns() - gc_enqueue_call_start_ns);
             perf_record_ns(PROF_SERVER_PUT_GC_ENQUEUE, perf_now_ns() - gc_enqueue_start_ns);
@@ -199,7 +216,6 @@ static void put(request_region_poller_thread_args_t *args, header_slot_t slot, u
         perf_now_ns() - insert_start_ns,
         (uint64_t) slot.key_length + slot.value_length + sizeof(uint32_t)
     );
-    free(data);
 
     // Need to do this before sending ack in case of race
     uint64_t mark_unused_start_ns = perf_now_ns();
@@ -224,22 +240,6 @@ int request_region_poller(void *arg) {
         exit(EXIT_FAILURE);
     }
     queue_init(queue);
-
-    garbage_collection_thread_args_t *garbage_collection_thread_args = malloc(sizeof(garbage_collection_thread_args_t));
-    if (garbage_collection_thread_args == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    garbage_collection_thread_args->queue = queue;
-    garbage_collection_thread_args->buddy = buddy;
-
-    pthread_t gc_thread_id;
-    pthread_create(
-            &gc_thread_id,
-            NULL,
-            garbage_collection_thread,
-            garbage_collection_thread_args);
 
     // Set up buddy allocator
     void *buddy_metadata = malloc(buddy_sizeof(DATA_REGION_SIZE));
@@ -299,9 +299,16 @@ int request_region_poller(void *arg) {
          * sync up, as when we hit a slot that we actually need to do something with, the next in the loop will be ready
          * when we continue;.
          */
+        collect_due_garbage(queue);
+
         for (uint32_t current_head_slot = 0; current_head_slot < REQUEST_SLOTS; current_head_slot++) {
+            // Status first: the client writes the fields, fences, then the status, so fields read after a used
+            // status are the new ones. Reading them in one struct copy can return the previous request's fields.
+            enum header_slot_status status = ((volatile header_slot_t *) &request_region->header_slots[current_head_slot])->status;
+            if (status == HEADER_SLOT_UNUSED) continue;
+            __asm__ volatile("" ::: "memory");
             header_slot_t slot = request_region->header_slots[current_head_slot];
-            if (slot.status == HEADER_SLOT_UNUSED) continue;
+            slot.status = status;
             uint64_t slot_total_start_ns = perf_now_ns();
 
             uint64_t slot_load_start_ns = perf_now_ns();
@@ -310,21 +317,17 @@ int request_region_poller(void *arg) {
             perf_record_ns(PROF_SERVER_POLL_SLOT_LOAD, perf_now_ns() - slot_load_start_ns);
 
             uint64_t key_alloc_start_ns = perf_now_ns();
-            char *key = malloc(slot.key_length + 1);
+            char key[UINT8_MAX + 1];
             perf_record_ns(PROF_SERVER_POLL_KEY_ALLOC, perf_now_ns() - key_alloc_start_ns);
-            if (key == NULL) {
-                perror("malloc");
-                exit(EXIT_FAILURE);
-            }
 
             uint64_t key_copy_start_ns = perf_now_ns();
-            for (uint32_t i = 0; i < slot.key_length; i++) {
-                key[i] = data_slot_start[offset];
-                offset++;
-                if (offset == REQUEST_REGION_DATA_SIZE) {
-                    offset = 0;
-                }
+            uint32_t key_first_len = (uint32_t) (REQUEST_REGION_DATA_SIZE - offset);
+            if (key_first_len > slot.key_length) key_first_len = slot.key_length;
+            memcpy(key, data_slot_start + offset, key_first_len);
+            if (slot.key_length > key_first_len) {
+                memcpy(key + key_first_len, data_slot_start, slot.key_length - key_first_len);
             }
+            offset = (offset + slot.key_length) % REQUEST_REGION_DATA_SIZE;
             perf_record_ns_bytes(PROF_SERVER_POLL_KEY_COPY, perf_now_ns() - key_copy_start_ns, slot.key_length);
             key[slot.key_length] = '\0';
 
@@ -352,7 +355,7 @@ int request_region_poller(void *arg) {
                             perf_record_ns(PROF_SERVER_POLL_DISPATCH_GET1, perf_now_ns() - dispatch_get1_start_ns);
                             break;
                         }
-                        send_get_ack_phase1(args->replica_number, replica_ack, current_head_slot, key_hash,
+                        send_get_ack_phase1(args->replica_number, replica_ack, current_head_slot, slot.request_tag, key_hash,
                                             args->index_region, args->replica_number == slot.replica_write_back_hint,
                                             slot.return_offset, args->data_region);
                         perf_record_ns(PROF_SERVER_POLL_DISPATCH_GET1, perf_now_ns() - dispatch_get1_start_ns);
@@ -362,7 +365,7 @@ int request_region_poller(void *arg) {
                     {
                         uint64_t dispatch_get2_start_ns = perf_now_ns();
                         if (slot.replica_write_back_hint == args->replica_number) {
-                            send_get_ack_phase2(replica_ack, current_head_slot, ((char *) args->data_region) + slot.offset,
+                            send_get_ack_phase2(replica_ack, current_head_slot, slot.request_tag, ((char *) args->data_region) + slot.offset,
                                                 slot.key_length + slot.value_length + sizeof(uint32_t), slot.return_offset);
                         } else {
                             request_region->header_slots[current_head_slot].status = HEADER_SLOT_UNUSED;
@@ -380,7 +383,6 @@ int request_region_poller(void *arg) {
             perf_record_ns(PROF_SERVER_POLL_DISPATCH_TOTAL, perf_now_ns() - dispatch_total_start_ns);
 
             uint64_t key_free_start_ns = perf_now_ns();
-            free(key);
             perf_record_ns(PROF_SERVER_POLL_KEY_FREE, perf_now_ns() - key_free_start_ns);
 
             uint64_t bookkeeping_start_ns = perf_now_ns();
@@ -410,11 +412,12 @@ static void send_put_ack(uint8_t replica_index, volatile replica_ack_t *replica_
     volatile replica_ack_t *replica_ack_instance = replica_ack_remote_pointer + (header_slot * REPLICA_COUNT) + replica_index;
     replica_ack_instance->version_number = version_number;
     replica_ack_instance->index_entry_written = -1;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = ack_type;
     _mm_sfence();
 }
 
-static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 uint32_t key_hash, char *index_region, bool write_back,
                                 size_t write_back_offset, char *data_region) {
     uint64_t total_start_ns = perf_now_ns();
@@ -499,6 +502,8 @@ static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *r
 
     uint64_t ack_finalize_start_ns = perf_now_ns();
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    replica_ack_instance->version_number = request_tag;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     uint64_t ack_finalize_ns = perf_now_ns() - ack_finalize_start_ns;
     record_start_ns = perf_now_ns();
@@ -531,7 +536,7 @@ static void send_get_ack_phase1(uint8_t replica_index, volatile replica_ack_t *r
     perf_record_ns(PROF_SERVER_GET1_ACK_TOTAL, total_ns);
 }
 
-static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot,
+static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_pointer, uint32_t header_slot, uint32_t request_tag,
                                 const char *data_pointer, uint32_t transfer_length, size_t return_offset) {
     uint64_t total_start_ns = perf_now_ns();
     volatile replica_ack_t *replica_ack_instance = replica_ack_remote_pointer + (header_slot * REPLICA_COUNT);
@@ -542,6 +547,8 @@ static void send_get_ack_phase2(volatile replica_ack_t *replica_ack_remote_point
     perf_record_ns_bytes(PROF_SERVER_GET2_COPY, perf_now_ns() - copy_start_ns, transfer_length);
     replica_ack_instance->index_entry_written = -1;
     request_region->header_slots[header_slot].status = HEADER_SLOT_UNUSED;
+    replica_ack_instance->version_number = request_tag;
+    _mm_sfence();
     replica_ack_instance->replica_ack_type = REPLICA_ACK_SUCCESS;
     perf_record_ns(PROF_SERVER_GET2_ACK_TOTAL, perf_now_ns() - total_start_ns);
 }

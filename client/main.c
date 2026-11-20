@@ -186,8 +186,11 @@ static void do_experiment_with_max_inflight(
     request_promise_t **active = calloc(max_inflight, sizeof(*active));
     uint64_t *latencies = malloc(NUM_SAMPLES * sizeof(*latencies));
     uint32_t errors[REQUEST_PROMISE_STATUS_COUNT] = {0};
+    // GET latencies split by whether a second round was needed
+    uint64_t *round_latencies[2] = {malloc(NUM_SAMPLES * sizeof(uint64_t)), malloc(NUM_SAMPLES * sizeof(uint64_t))};
+    uint32_t round_count[2] = {0, 0};
 
-    if (!active || !latencies) {
+    if (!active || !latencies || !round_latencies[0] || !round_latencies[1]) {
         fprintf(stderr, "allocation failed\n");
         free(active);
         free(latencies);
@@ -224,6 +227,10 @@ static void do_experiment_with_max_inflight(
                 (uint64_t)p->duration.tv_sec * NS_PER_SEC +
                 (uint64_t)p->duration.tv_nsec;
             total_latency_ns += latencies[completed];
+            if (p->operation == OP_GET && (p->result == PROMISE_SUCCESS_PH1 || p->result == PROMISE_SUCCESS)) {
+                uint32_t rounds_index = (p->result == PROMISE_SUCCESS) ? 1 : 0;
+                round_latencies[rounds_index][round_count[rounds_index]++] = latencies[completed];
+            }
             completed++;
 
             if (p->result == PROMISE_SUCCESS && p->operation == OP_GET) {
@@ -283,6 +290,31 @@ static void do_experiment_with_max_inflight(
     printf("    p50 latency               : %" PRIu64 " ns\n", p50_ns);
     printf("    p95 latency               : %" PRIu64 " ns\n", p95_ns);
     printf("    p99 latency               : %" PRIu64 " ns\n", p99_ns);
+    for (uint32_t rounds_index = 0; rounds_index < 2; rounds_index++) {
+        uint32_t count = round_count[rounds_index];
+        uint64_t sum_ns = 0;
+        if (count == 0) {
+            continue;
+        }
+        qsort(round_latencies[rounds_index], count, sizeof(uint64_t), cmp_u64);
+        for (uint32_t i = 0; i < count; i++) {
+            sum_ns += round_latencies[rounds_index][i];
+        }
+        printf("    ROUNDS %u gets %u avg %" PRIu64 " p50 %" PRIu64 " p99 %" PRIu64 " ns\n", rounds_index + 1, count, sum_ns / count,
+               round_latencies[rounds_index][((uint64_t) (count - 1) * 50) / 100], round_latencies[rounds_index][((uint64_t) (count - 1) * 99) / 100]);
+    }
+    free(round_latencies[0]);
+    free(round_latencies[1]);
+    {
+        uint32_t over60 = 0, over30 = 0;
+        for (uint32_t q = 0; q < NUM_SAMPLES; q++) {
+            if (latencies[q] >= 60000) over60++;
+            if (latencies[q] >= 30000) over30++;
+        }
+        printf("    TAIL p99.9 %" PRIu64 " p99.99 %" PRIu64 " max %" PRIu64 " over30us %u over60us %u\n",
+               latencies[((NUM_SAMPLES - 1) * 999) / 1000], latencies[((NUM_SAMPLES - 1) * 9999) / 10000],
+               latencies[NUM_SAMPLES - 1], over30, over60);
+    }
     printf("    throughput                : %.2f ops/sec\n", throughput_ops_per_sec);
     printf("    avg in-flight             : %.2f\n", avg_in_flight);
 
@@ -392,8 +424,8 @@ int main(int argc, char *argv[]) {
     request_promise_t *promise;
 
 
-    for (unsigned char i = 0; i < VALUE_LEN; i++) {
-        sample_data[i] = i;
+    for (uint32_t i = 0; i < VALUE_LEN; i++) {
+        sample_data[i] = (unsigned char) i;
     }
 
     printf("Loading table that has %lu index buckets\n", INDEX_BUCKETS);

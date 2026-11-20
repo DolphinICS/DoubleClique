@@ -2,6 +2,7 @@
 #define DOUBLECLIQUE_ACK_REGION_H
 
 #include <stdint.h>
+#include <time.h>
 #include "request_region.h"
 
 enum request_promise_status {
@@ -38,6 +39,7 @@ enum request_type {
 
 typedef struct {
     struct timespec start_time;
+    struct timespec request_start; // A GET's second round keeps the first round's, so the duration covers both
     volatile header_slot_t *header_slot_WRITE_ONLY;
     enum request_type request_type;
     request_promise_t *promise;
@@ -49,6 +51,7 @@ typedef struct {
     uint32_t starting_ack_data_offset;
     uint32_t ack_data_size;
     uint32_t key_hash; // Only valid for GET_PHASE1 request types
+    uint32_t request_tag;
     replica_ack_t *replica_ack_instances[REPLICA_COUNT];
 } ack_slot_t;
 

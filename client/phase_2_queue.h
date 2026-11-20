@@ -13,6 +13,7 @@ typedef struct {
     uint32_t value_len;
     ptrdiff_t server_data_offset;
     request_promise_t *promise;
+    struct timespec request_start;
 } queue_item_t;
 
 void enqueue(queue_item_t item);
